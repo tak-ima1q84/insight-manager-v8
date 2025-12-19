@@ -23,10 +23,6 @@ const app = new Elysia()
   .use(authRoutes)
   .use(insightRoutes)
   .use(masterRoutes)
-  .use(staticPlugin({ 
-    assets: 'dist',
-    prefix: '/',
-  }))
   .get('/assets/*', ({ params }) => {
     const path = (params as any)['*'];
     return Bun.file(`dist/assets/${path}`);
@@ -39,7 +35,7 @@ const app = new Elysia()
   .get('*', ({ path }) => {
     // Serve static files if they exist, otherwise serve index.html for SPA routing
     const file = Bun.file(`dist${path}`);
-    return file.size > 0 ? file : Bun.file('dist/index.html');
+    return file.exists() ? file : Bun.file('dist/index.html');
   })
   .listen(process.env.PORT || 3000);
 
