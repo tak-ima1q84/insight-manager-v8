@@ -216,6 +216,13 @@ export const insightRoutes = new Elysia({ prefix: '/api/insights' })
       const text = await file.text();
       const lines = text.split('\n').filter((line: string) => line.trim());
       
+      // Log line lengths for debugging
+      lines.forEach((line, index) => {
+        if (line.length > 5000) {
+          console.warn(`Line ${index + 1} is very long (${line.length} characters). This might cause parsing issues.`);
+        }
+      });
+      
       if (lines.length < 2) {
         set.status = 400;
         return { error: 'CSV file is empty or invalid' };
@@ -223,6 +230,11 @@ export const insightRoutes = new Elysia({ prefix: '/api/insights' })
 
       // Helper function to parse CSV line properly (handles commas in quoted fields)
       const parseCSVLine = (line: string): string[] => {
+        // Handle very long lines by checking if they're properly terminated
+        if (line.length > 10000) {
+          console.warn(`Processing very long line (${line.length} chars)`);
+        }
+        
         const result = [];
         let current = '';
         let inQuotes = false;
@@ -248,6 +260,12 @@ export const insightRoutes = new Elysia({ prefix: '/api/insights' })
           }
         }
         result.push(current);
+        
+        // Validate we have the expected number of columns
+        if (result.length !== 34) {
+          console.warn(`Parsed ${result.length} columns, expected 34. Line length: ${line.length}`);
+        }
+        
         return result;
       };
 
