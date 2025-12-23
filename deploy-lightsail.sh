@@ -1,12 +1,9 @@
 #!/bin/bash
 
-# AWS Lightsail Deployment Script for Insight Manager v7
-# This script automates the deployment process on a fresh Lightsail instance
+# AWS Lightsail Deployment Script for Insight Manager v8
+# This script automates the deployment process
 
-set -e  # Exit on any error
-
-echo "🚀 AWS Lightsail Deployment Script for Insight Manager v7"
-echo "=================================================="
+set -e
 
 # Colors for output
 RED='\033[0;31m'
@@ -15,9 +12,370 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# Function to print colored output
+# Configuration
+PROJECT_NAME="insight-manager-v8"
+DB_NAME="insight-manager-v8-db"
+INSTANCE_NAME="insight-manager-v8"
+STATIC_IP_NAME="insight-manager-v8-ip"
+
+echo -e "${BLUE}🚀 AWS Lightsail Deployment Script for Insight Manager v8${NC}"
+echo -e "${BLUE}================================================================${NC}"
+
+# Function to print status
 print_status() {
-    echo -e "${BLUE}[INFO]${NC} $1"
+    echo -e "${GREEN}✅ $1${NC}"
+}
+
+print_warning() {
+    echo -e "${YELLOW}⚠️  $1${NC}"
+}
+
+print_error() {
+    echo -e "${RED}❌ $1${NC}"
+}
+
+# Check if AWS CLI is installed
+if ! command -v aws &> /dev/null; then
+    print_error "AWS CLI is not installed. Please install it first."
+    exit 1
+fi
+
+# Check if user is logged in to AWS
+if ! aws sts get-caller-identity &> /dev/null; then
+    print_error "AWS CLI is not configured. Please run 'aws configure' first."
+    exit 1
+fi
+
+print_status "AWS CLI is configured and ready"
+
+# Get AWS region
+AWS_REGION=$(aws configure get region)
+if [ -z "$AWS_REGION" ]; then
+    AWS_REGION="us-east-1"
+    print_warning "No region configured, using default: $AWS_REGION"
+fi
+
+echo -e "${BLUE}Using AWS Region: $AWS_REGION${NC}"
+
+# Function to generate secure password
+generate_password() {
+    openssl rand -base64 24 | tr -d "=+/" | cut -c1-20
+}
+
+# Step 1: Create PostgreSQL Database
+echo -e "\n${BLUE}Step 1: Creating PostgreSQL Database${NC}"
+
+# Check if database already exists
+if aws lightsail get-relational-database --relational-database-name $DB_NAME &> /dev/null; then
+    print_warning "Database $DB_NAME already exists"
+    DB_ENDPOINT=$(aws lightsail get-relational-database \
+        --relational-database-name $DB_NAME \
+        --query 'relationalDatabase.masterEndpoint.address' \
+        --output text)
+    print_status "Database endpoint: $DB_ENDPOINT"
+else
+    print_status "Creating new PostgreSQL database..."
+    
+    # Generate secure database password
+    DB_PASSWORD=$(generate_password)
+    
+    # Create database
+    aws lightsail create-relational-database \
+        --relational-database-name $DB_NAME \
+        --relational-database-blueprint-id postgres_16 \
+        --relational-database-bundle-id micro_2_0 \
+        --master-database-name insight_manager \
+        --master-username postgres \
+        --master-user-password "$DB_PASSWORD" \
+        --backup-retention-enabled \
+        --preferred-backup-window "03:00-04:00" \
+        --preferred-maintenance-window "sun:04:00-sun:05:00"
+    
+    print_status "Database creation initiated. Waiting for it to be available..."
+    
+    # Wait for database to be available
+    while true; do
+        STATUS=$(aws lightsail get-relational-database \
+            --relational-database-name $DB_NAME \
+            --query 'relationalDatabase.state' \
+            --output text 2>/dev/null || echo "pending")
+        
+        if [ "$STATUS" = "available" ]; then
+            break
+        fi
+        
+        echo -e "${YELLOW}Database status: $STATUS. Waiting...${NC}"
+        sleep 30
+    done
+    
+    # Get database endpoint
+    DB_ENDPOINT=$(aws lightsail get-relational-database \
+        --relational-database-name $DB_NAME \
+        --query 'relationalDatabase.masterEndpoint.address' \
+        --output text)
+    
+    print_status "Database created successfully!"
+    print_status "Database endpoint: $DB_ENDPOINT"
+    print_status "Database password: $DB_PASSWORD"
+    
+    # Save credentials to file
+    cat > db_credentials.txt << EOF
+Database Name: $DB_NAME
+Database Endpoint: $DB_ENDPOINT
+Database User: postgres
+Database Password: $DB_PASSWORD
+Database Name: insight_manager
+EOF
+    
+    print_warning "Database credentials saved to db_credentials.txt - KEEP THIS SECURE!"
+fi
+
+# Step 2: Create Ubuntu Instance
+echo -e "\n${BLUE}Step 2: Creating Ubuntu Instance${NC}"
+
+# Check if instance already exists
+if aws lightsail get-instance --instance-name $INSTANCE_NAME &> /dev/null; then
+    print_warning "Instance $INSTANCE_NAME already exists"
+    INSTANCE_IP=$(aws lightsail get-instance \
+        --instance-name $INSTANCE_NAME \
+        --query 'instance.publicIpAddress' \
+        --output text)
+    print_status "Instance IP: $INSTANCE_IP"
+else
+    print_status "Creating Ubuntu instance..."
+    
+    # Create instance
+    aws lightsail create-instances \
+        --instance-names $INSTANCE_NAME \
+        --availability-zone ${AWS_REGION}a \
+        --blueprint-id ubuntu_22_04 \
+        --bundle-id medium_2_0
+    
+    print_status "Instance creation initiated. Waiting for it to be running..."
+    
+    # Wait for instance to be running
+    while true; do
+        STATUS=$(aws lightsail get-instance \
+            --instance-name $INSTANCE_NAME \
+            --query 'instance.state.name' \
+            --output text 2>/dev/null || echo "pending")
+        
+        if [ "$STATUS" = "running" ]; then
+            break
+        fi
+        
+        echo -e "${YELLOW}Instance status: $STATUS. Waiting...${NC}"
+        sleep 15
+    done
+    
+    # Get instance IP
+    INSTANCE_IP=$(aws lightsail get-instance \
+        --instance-name $INSTANCE_NAME \
+        --query 'instance.publicIpAddress' \
+        --output text)
+    
+    print_status "Instance created successfully!"
+    print_status "Instance IP: $INSTANCE_IP"
+fi
+
+# Step 3: Configure Networking
+echo -e "\n${BLUE}Step 3: Configuring Networking${NC}"
+
+# Open required ports
+print_status "Opening required ports..."
+
+aws lightsail open-instance-public-ports \
+    --instance-name $INSTANCE_NAME \
+    --port-info fromPort=8080,toPort=8080,protocol=TCP || true
+
+aws lightsail open-instance-public-ports \
+    --instance-name $INSTANCE_NAME \
+    --port-info fromPort=80,toPort=80,protocol=TCP || true
+
+aws lightsail open-instance-public-ports \
+    --instance-name $INSTANCE_NAME \
+    --port-info fromPort=443,toPort=443,protocol=TCP || true
+
+print_status "Ports configured successfully"
+
+# Step 4: Create Static IP
+echo -e "\n${BLUE}Step 4: Creating Static IP${NC}"
+
+# Check if static IP already exists
+if aws lightsail get-static-ip --static-ip-name $STATIC_IP_NAME &> /dev/null; then
+    print_warning "Static IP $STATIC_IP_NAME already exists"
+    STATIC_IP=$(aws lightsail get-static-ip \
+        --static-ip-name $STATIC_IP_NAME \
+        --query 'staticIp.ipAddress' \
+        --output text)
+    print_status "Static IP: $STATIC_IP"
+else
+    print_status "Creating static IP..."
+    
+    # Create static IP
+    aws lightsail allocate-static-ip --static-ip-name $STATIC_IP_NAME
+    
+    # Attach to instance
+    aws lightsail attach-static-ip \
+        --static-ip-name $STATIC_IP_NAME \
+        --instance-name $INSTANCE_NAME
+    
+    # Get static IP
+    STATIC_IP=$(aws lightsail get-static-ip \
+        --static-ip-name $STATIC_IP_NAME \
+        --query 'staticIp.ipAddress' \
+        --output text)
+    
+    print_status "Static IP created and attached: $STATIC_IP"
+fi
+
+# Step 5: Generate deployment files
+echo -e "\n${BLUE}Step 5: Generating Deployment Files${NC}"
+
+# Generate JWT secret
+JWT_SECRET=$(openssl rand -base64 32)
+
+# Create production environment file
+cat > .env.production << EOF
+# AWS Lightsail PostgreSQL Database Configuration
+LIGHTSAIL_DB_HOST=$DB_ENDPOINT
+LIGHTSAIL_DB_PORT=5432
+LIGHTSAIL_DB_USER=postgres
+LIGHTSAIL_DB_PASSWORD=$DB_PASSWORD
+LIGHTSAIL_DB_NAME=insight_manager
+LIGHTSAIL_DB_SSL=true
+
+# Server Configuration
+PORT=3000
+JWT_SECRET=$JWT_SECRET
+
+# Production Environment
+NODE_ENV=production
+EOF
+
+print_status "Production environment file created: .env.production"
+
+# Create deployment instructions
+cat > DEPLOYMENT_INSTRUCTIONS.md << EOF
+# Deployment Instructions for $INSTANCE_NAME
+
+## Server Details
+- **Instance Name**: $INSTANCE_NAME
+- **Instance IP**: $INSTANCE_IP
+- **Static IP**: $STATIC_IP
+- **Database Endpoint**: $DB_ENDPOINT
+
+## SSH Connection
+\`\`\`bash
+ssh -i LightsailDefaultKey-${AWS_REGION}.pem ubuntu@$STATIC_IP
+\`\`\`
+
+## Next Steps
+
+1. **Connect to your instance**:
+   \`\`\`bash
+   ssh -i LightsailDefaultKey-${AWS_REGION}.pem ubuntu@$STATIC_IP
+   \`\`\`
+
+2. **Install dependencies** (run on the instance):
+   \`\`\`bash
+   # Update system
+   sudo apt update && sudo apt upgrade -y
+   
+   # Install Docker
+   curl -fsSL https://get.docker.com -o get-docker.sh
+   sudo sh get-docker.sh
+   sudo usermod -aG docker ubuntu
+   
+   # Install Docker Compose
+   sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-\$(uname -s)-\$(uname -m)" -o /usr/local/bin/docker-compose
+   sudo chmod +x /usr/local/bin/docker-compose
+   
+   # Install additional tools
+   sudo apt install git htop nano curl postgresql-client-14 -y
+   
+   # Logout and login for docker group
+   exit
+   \`\`\`
+
+3. **Deploy application** (after reconnecting):
+   \`\`\`bash
+   # Clone repository
+   git clone https://github.com/tak-ima1q84/insight-manager-v8.git
+   cd insight-manager-v8
+   
+   # Copy production environment (upload .env.production to server)
+   # scp -i LightsailDefaultKey-${AWS_REGION}.pem .env.production ubuntu@$STATIC_IP:~/insight-manager-v8/.env
+   
+   # Start application
+   docker-compose up -d
+   
+   # Initialize database
+   sleep 30
+   docker-compose exec app bun run db:push
+   docker-compose exec app bun run db:seed
+   
+   # Test application
+   curl http://localhost:8080/health
+   \`\`\`
+
+4. **Configure Nginx** (optional, for custom domain):
+   Follow the Nginx configuration in LIGHTSAIL_DEPLOYMENT_V8.md
+
+## Important Files
+- Database credentials: db_credentials.txt
+- Production environment: .env.production
+- Deployment guide: LIGHTSAIL_DEPLOYMENT_V8.md
+
+## Access Your Application
+- **Direct access**: http://$STATIC_IP:8080
+- **With domain**: Configure DNS A record pointing to $STATIC_IP
+
+## Database Connection
+\`\`\`bash
+psql -h $DB_ENDPOINT -U postgres -d insight_manager
+\`\`\`
+EOF
+
+print_status "Deployment instructions created: DEPLOYMENT_INSTRUCTIONS.md"
+
+# Step 6: Summary
+echo -e "\n${GREEN}🎉 Deployment Setup Complete!${NC}"
+echo -e "${BLUE}================================================================${NC}"
+echo -e "${GREEN}Instance Name:${NC} $INSTANCE_NAME"
+echo -e "${GREEN}Instance IP:${NC} $INSTANCE_IP"
+echo -e "${GREEN}Static IP:${NC} $STATIC_IP"
+echo -e "${GREEN}Database Endpoint:${NC} $DB_ENDPOINT"
+echo -e "${GREEN}Database Name:${NC} insight_manager"
+echo -e "${GREEN}Database User:${NC} postgres"
+echo -e "${BLUE}================================================================${NC}"
+
+echo -e "\n${YELLOW}Next Steps:${NC}"
+echo -e "1. Connect to your instance: ${BLUE}ssh -i LightsailDefaultKey-${AWS_REGION}.pem ubuntu@$STATIC_IP${NC}"
+echo -e "2. Follow the instructions in ${BLUE}DEPLOYMENT_INSTRUCTIONS.md${NC}"
+echo -e "3. Upload ${BLUE}.env.production${NC} to your server"
+echo -e "4. Deploy your application using docker-compose"
+
+echo -e "\n${YELLOW}Important Files Created:${NC}"
+echo -e "- ${BLUE}db_credentials.txt${NC} - Database credentials (KEEP SECURE!)"
+echo -e "- ${BLUE}.env.production${NC} - Production environment variables"
+echo -e "- ${BLUE}DEPLOYMENT_INSTRUCTIONS.md${NC} - Step-by-step deployment guide"
+
+echo -e "\n${GREEN}Your AWS Lightsail infrastructure is ready for Insight Manager v8!${NC}"
+
+# Optional: Test database connection
+echo -e "\n${YELLOW}Testing database connection...${NC}"
+if command -v psql &> /dev/null; then
+    if PGPASSWORD="$DB_PASSWORD" psql -h "$DB_ENDPOINT" -U postgres -d insight_manager -c "SELECT version();" &> /dev/null; then
+        print_status "Database connection test successful!"
+    else
+        print_warning "Database connection test failed. Database might still be initializing."
+    fi
+else
+    print_warning "PostgreSQL client not installed. Skipping connection test."
+fi
+
+echo -e "\n${BLUE}Deployment script completed successfully!${NC}"
 }
 
 print_success() {

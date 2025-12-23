@@ -39,7 +39,7 @@ git clone https://github.com/tak-ima1q84/insight-manager-v8.git
 cd insight-manager-v8
 
 # Run automated deployment
-./deploy-lightsail-v8.sh
+./deploy-lightsail.sh
 ```
 
 ### Option 2: Manual Setup
@@ -278,4 +278,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ---
 
-**🚀 Ready to deploy? Run `./deploy-lightsail-v8.sh` and get your Insight Manager v8 running on AWS Lightsail in minutes!**
+**🚀 Ready to deploy? Run `./deploy-lightsail.sh` and get your Insight Manager v8 running on AWS Lightsail in minutes!**
