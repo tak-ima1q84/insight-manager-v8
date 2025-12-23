@@ -1,5 +1,5 @@
 {
-  "name": "insight-manager-v7",
+  "name": "insight-manager-v8",
   "module": "index.ts",
   "type": "module",
   "private": true,
